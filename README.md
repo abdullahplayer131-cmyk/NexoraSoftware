@@ -31,4 +31,3 @@ IMPORTANT BEFORE PUBLIC LAUNCH
 - Do not upload copyrighted apps, cracked software, malware, or products you lack permission to distribute.
 - Implement private object storage / expiring download links before selling files. Never put paid files in `static/`.
 - Add privacy policy, terms, refund policy, tax/business details, HTTPS, backups, rate limits, and production server configuration.
-- gunicorn
