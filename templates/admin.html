@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin Dashboard — Nexora</title>
+<link rel="stylesheet" href="{{url_for('static',filename='style.css')}}">
+</head>
+<body class="admin-body">
+<header class="topbar">
+<a class="brand" href="/"><span class="brand-mark">N</span><span>NEXORA<small>ADMIN</small></span></a>
+<form action="/admin/logout" method="post"><button class="outline-btn">Sign out</button></form>
+</header>
+<main class="admin-wrap">
+<div class="section-heading"><div><h1>Store dashboard</h1><p>Manage products, upload files, and review orders.</p></div><a class="outline-btn" href="/">View store ↗</a></div>
+{% with messages = get_flashed_messages() %}{% for message in messages %}<div class="notice">{{message}}</div>{% endfor %}{% endwith %}
+
+<section class="admin-panel">
+<h2>Add a product</h2>
+<form class="product-form" id="productUploadForm">
+<label>Product name<input name="name" maxlength="120" required placeholder="Example: My Windows Utility"></label>
+<label>Category<select name="category"><option>Windows Software</option><option>Android APKs</option><option>Bundles</option><option>Security</option><option>Utilities</option></select></label>
+<label>Price (PKR)<input type="number" name="price" min="1" max="10000000" required></label>
+<label>Badge<input name="tag" maxlength="30" placeholder="New"></label>
+<label>Icon style<select name="icon"><option value="software">Software</option><option value="win11">Windows</option><option value="office">Office</option><option value="android">Android</option><option value="security">Security</option><option value="design">Design</option><option value="bundle">Bundle</option></select></label>
+<label class="wide">Product file (APK / EXE / ZIP)<input type="file" name="product_file" accept=".apk,.exe,.zip" required><small class="cell-sub">Maximum 100 MB. Browser sends small chunks; file is then uploaded to Patrins.</small></label>
+<label class="wide">Description<textarea name="description" rows="3" maxlength="1000" placeholder="What does the product do?"></textarea></label>
+<button class="btn" id="uploadButton" type="submit">Upload &amp; add product +</button>
+<p id="uploadProgress" class="fine-print wide" role="status" aria-live="polite"></p>
+</form>
+</section>
+
+<section class="admin-panel">
+<h2>Products <span class="count">{{products|length}}</span></h2>
+<div class="table-wrap"><table><thead><tr><th>Product</th><th>Category</th><th>Price</th><th>File</th><th>Status</th><th>Action</th></tr></thead><tbody>
+{% for p in products %}<tr><td>{{p.name}}</td><td>{{p.category}}</td><td>Rs. {{ "{:,}".format(p.price) }}</td><td>{{"Uploaded" if p.download_file_id else "No file"}}</td><td>{{"Active" if p.active else "Hidden"}}</td><td><form action="/admin/products/{{p.id}}/toggle" method="post"><button class="table-btn">{{"Hide" if p.active else "Activate"}}</button></form></td></tr>{% endfor %}
+</tbody></table></div>
+</section>
+
+<section class="admin-panel">
+<h2>Orders <span class="count">{{orders|length}}</span></h2>
+<p class="fine-print">Checkout is demo mode and does not collect payment. Only mark Paid after independently confirming payment. A live gateway should update this through a verified server-side webhook.</p>
+<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Status</th><th>Update</th></tr></thead><tbody>
+{% for o in orders %}<tr><td>#{{o.id}}<small class="cell-sub">{{o.created_at}}</small></td><td>{{o.customer_name}}<small class="cell-sub">{{o.email}}</small></td><td>{{o.items_json}}</td><td>Rs. {{ "{:,}".format(o.total) }}</td><td>{{o.status}}</td><td><form class="status-form" action="/admin/orders/{{o.id}}/status" method="post"><select name="status"><option value="pending" {% if o.status=='pending' %}selected{% endif %}>Pending</option><option value="paid" {% if o.status=='paid' %}selected{% endif %}>Paid</option><option value="cancelled" {% if o.status=='cancelled' %}selected{% endif %}>Cancelled</option></select><button class="table-btn">Save</button></form></td></tr>
+{% else %}<tr><td colspan="6">No orders yet.</td></tr>{% endfor %}
+</tbody></table></div>
+</section>
+</main>
+
+<script>
+(() => {
+  const form = document.getElementById("productUploadForm");
+  const button = document.getElementById("uploadButton");
+  const progress = document.getElementById("uploadProgress");
+  const CHUNK_SIZE = 256 * 1024;
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = new FormData(form);
+    const file = values.get("product_file");
+
+    if (!(file instanceof File) || !file.name) {
+      progress.textContent = "Please select an APK, EXE, or ZIP file.";
+      return;
+    }
+    if (file.size < 1 || file.size > 100 * 1024 * 1024) {
+      progress.textContent = "File must be between 1 byte and 100 MB.";
+      return;
+    }
+
+    button.disabled = true;
+    const originalText = button.textContent;
+    button.textContent = "Uploading...";
+    progress.textContent = "Starting upload...";
+
+    try {
+      const startResponse = await fetch("/admin/chunk-upload/start", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          name: values.get("name"),
+          category: values.get("category"),
+          price: values.get("price"),
+          tag: values.get("tag"),
+          icon: values.get("icon"),
+          description: values.get("description"),
+          filename: file.name,
+          size: file.size
+        })
+      });
+      const startData = await startResponse.json().catch(() => ({}));
+      if (!startResponse.ok) throw new Error(startData.error || `Start failed (${startResponse.status}).`);
+      const uploadId = startData.upload_id;
+      if (!uploadId) throw new Error("Server did not return an upload session.");
+
+      const totalParts = Math.ceil(file.size / CHUNK_SIZE);
+      for (let part = 0; part < totalParts; part++) {
+        const chunk = file.slice(part * CHUNK_SIZE, Math.min((part + 1) * CHUNK_SIZE, file.size));
+        const chunkForm = new FormData();
+        chunkForm.append("chunk", chunk, "chunk.bin");
+
+        const response = await fetch(`/admin/chunk-upload/${uploadId}/${part}`, {
+          method: "POST",
+          body: chunkForm
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `Chunk ${part + 1} failed (${response.status}).`);
+
+        progress.textContent = `Uploading from browser: ${Math.round(((part + 1) / totalParts) * 100)}% (${part + 1}/${totalParts})`;
+      }
+
+      progress.textContent = "Browser upload complete. Uploading to Patrins and saving product...";
+      const finishResponse = await fetch(`/admin/chunk-upload/${uploadId}/finish`, {method: "POST"});
+      const finishData = await finishResponse.json().catch(() => ({}));
+      if (!finishResponse.ok) throw new Error(finishData.error || `Final step failed (${finishResponse.status}).`);
+
+      progress.textContent = finishData.message || "Product added successfully.";
+      window.location.reload();
+    } catch (error) {
+      progress.textContent = "Upload failed: " + error.message;
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  });
+})();
+</script>
+</body>
+</html>
