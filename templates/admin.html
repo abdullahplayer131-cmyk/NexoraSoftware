@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin Dashboard — Nexora</title>
+<link rel="stylesheet" href="{{url_for('static',filename='style.css')}}">
+</head>
+<body class="admin-body">
+<header class="topbar">
+<a class="brand" href="/"><span class="brand-mark">N</span><span>NEXORA<small>ADMIN</small></span></a>
+<form action="/admin/logout" method="post"><button class="outline-btn">Sign out</button></form>
+</header>
+<main class="admin-wrap">
+<div class="section-heading"><div><h1>Store dashboard</h1><p>Manage products, upload files, and review orders.</p></div><a class="outline-btn" href="/">View store ↗</a></div>
+{% with messages = get_flashed_messages() %}{% for message in messages %}<div class="notice">{{message}}</div>{% endfor %}{% endwith %}
+
+<section class="admin-panel">
+<h2>Add a product</h2>
+<form class="product-form" id="productUploadForm">
+<label>Product name<input name="name" maxlength="120" required placeholder="Example: My Windows Utility"></label>
+<label>Category<select name="category"><option>Windows Software</option><option>Android APKs</option><option>Bundles</option><option>Security</option><option>Utilities</option></select></label>
+<label>Price (PKR)<input type="number" name="price" min="1" max="10000000" required></label>
+<label>Badge<input name="tag" maxlength="30" placeholder="New"></label>
+<label>Icon style<select name="icon"><option value="software">Software</option><option value="win11">Windows</option><option value="office">Office</option><option value="android">Android</option><option value="security">Security</option><option value="design">Design</option><option value="bundle">Bundle</option></select></label>
+<label class="wide">Product file (APK / EXE / ZIP)<input type="file" name="product_file" accept=".apk,.exe,.zip" required><small class="cell-sub">Maximum 100 MB. Browser sends small chunks; file is then uploaded to Patrins.</small></label>
+<label class="wide">Description<textarea name="description" rows="3" maxlength="1000" placeholder="What does the product do?"></textarea></label>
+<button class="btn" id="uploadButton" type="submit">Upload &amp; add product +</button>
+<p id="uploadProgress" class="fine-print wide" role="status" aria-live="polite"></p>
+</form>
+</section>
+
+<section class="admin-panel">
+<h2>Products <span class="count">{{products|length}}</span></h2>
+<div class="table-wrap"><table><thead><tr><th>Product</th><th>Category</th><th>Price</th><th>File</th><th>Status</th><th>Action</th></tr></thead><tbody>
+{% for p in products %}<tr><td>{{p.name}}</td><td>{{p.category}}</td><td>Rs. {{ "{:,}".format(p.price) }}</td><td>{{"Uploaded" if p.download_file_id else "No file"}}</td><td>{{"Active" if p.active else "Hidden"}}</td><td><form action="/admin/products/{{p.id}}/toggle" method="post"><button class="table-btn">{{"Hide" if p.active else "Activate"}}</button></form></td></tr>{% endfor %}
+</tbody></table></div>
+</section>
+
+<section class="admin-panel">
+<h2>Orders <span class="count">{{orders|length}}</span></h2>
+<p class="fine-print">Checkout is demo mode and does not collect payment. Only mark Paid after independently confirming payment. A live gateway should update this through a verified server-side webhook.</p>
+<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Status</th><th>Update</th></tr></thead><tbody>
+{% for o in orders %}<tr><td>#{{o.id}}<small class="cell-sub">{{o.created_at}}</small></td><td>{{o.customer_name}}<small class="cell-sub">{{o.email}}</small></td><td>{{o.items_json}}</td><td>Rs. {{ "{:,}".format(o.total) }}</td><td>{{o.status}}</td><td><form class="status-form" action="/admin/orders/{{o.id}}/status" method="post"><select name="status"><option value="pending" {% if o.status=='pending' %}selected{% endif %}>Pending</option><option value="paid" {% if o.status=='paid' %}selected{% endif %}>Paid</option><option value="cancelled" {% if o.status=='cancelled' %}selected{% endif %}>Cancelled</option></select><button class="table-btn">Save</button></form></td></tr>
+{% else %}<tr><td colspan="6">No orders yet.</td></tr>{% endfor %}
+</tbody></table></div>
+</section>
+</main>
+
+<script>
+(() => {
+  const form = document.getElementById("productUploadForm");
+  const button = document.getElementById("uploadButton");
+  const progress = document.getElementById("uploadProgress");
+  const MAX_FILE = 100 * 1024 * 1024;
+  const POLL_MS = 2000;
+  const POLL_LIMIT_MS = 15 * 60 * 1000;
+  let busy = false;
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Every request goes through here so errors are always shown clearly.
+  async function api(url, options) {
+    let response;
+    try {
+      response = await fetch(url, Object.assign({credentials: "same-origin"}, options || {}));
+    } catch (e) {
+      throw new Error("Network error. Check your internet connection.");
+    }
+    const data = await response.json().catch(() => null);
+    if (response.status === 401) throw new Error("Session expired. Please sign in again, then retry.");
+    if (!data) throw new Error(`Unexpected server reply (HTTP ${response.status}).`);
+    if (!response.ok) throw new Error(data.error || `Request failed (HTTP ${response.status}).`);
+    return data;
+  }
+
+  async function sendChunk(uploadId, part, blob) {
+    let lastError;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const chunkForm = new FormData();
+        chunkForm.append("chunk", blob, "chunk.bin");
+        return await api(`/admin/chunk-upload/${uploadId}/${part}`, {method: "POST", body: chunkForm});
+      } catch (e) {
+        lastError = e;
+        if (/Session expired/.test(e.message)) throw e;
+        await sleep(attempt * 1000);
+      }
+    }
+    throw lastError;
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (busy) return; // blocks double submit
+    const values = new FormData(form);
+    const file = values.get("product_file");
+
+    if (!(file instanceof File) || !file.name) {
+      progress.textContent = "Please select an APK, EXE, or ZIP file.";
+      return;
+    }
+    if (file.size < 1 || file.size > MAX_FILE) {
+      progress.textContent = "File must be between 1 byte and 100 MB.";
+      return;
+    }
+
+    busy = true;
+    button.disabled = true;
+    const originalText = button.textContent;
+    button.textContent = "Uploading...";
+    progress.textContent = "Starting upload...";
+
+    try {
+      const start = await api("/admin/chunk-upload/start", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          name: values.get("name"),
+          category: values.get("category"),
+          price: values.get("price"),
+          tag: values.get("tag"),
+          icon: values.get("icon"),
+          description: values.get("description"),
+          filename: file.name,
+          size: file.size
+        })
+      });
+      const uploadId = start.upload_id;
+      const chunkSize = start.chunk_size;
+      if (!uploadId || !chunkSize) throw new Error("Server did not return an upload session.");
+
+      // Chunk size comes from the server so frontend and backend can never disagree.
+      const totalParts = Math.ceil(file.size / chunkSize);
+      for (let part = 0; part < totalParts; part++) {
+        const blob = file.slice(part * chunkSize, Math.min((part + 1) * chunkSize, file.size));
+        await sendChunk(uploadId, part, blob);
+        progress.textContent = `Step 1/2 — Sending from browser: ${Math.round(((part + 1) / totalParts) * 100)}% (${part + 1}/${totalParts})`;
+      }
+
+      progress.textContent = "Step 2/2 — Preparing file on server...";
+      await api(`/admin/chunk-upload/${uploadId}/finish`, {method: "POST"});
+
+      // The server uploads to Patrins in the background; we check its progress.
+      const began = Date.now();
+      let seconds = 0;
+      while (true) {
+        if (Date.now() - began > POLL_LIMIT_MS) throw new Error("Upload is taking too long. Check Hostless logs.");
+        await sleep(POLL_MS);
+        seconds = Math.round((Date.now() - began) / 1000);
+        const st = await api(`/admin/chunk-upload/${uploadId}/status`);
+        if (st.state === "done") {
+          progress.textContent = st.message || "Product added successfully.";
+          window.location.reload();
+          return;
+        }
+        if (st.state === "error") throw new Error(st.error || "Upload to Patrins failed.");
+        progress.textContent = `Step 2/2 — Uploading to Patrins... (${seconds}s) Please do not close this page.`;
+      }
+    } catch (error) {
+      progress.textContent = "Upload failed: " + error.message;
+      busy = false;
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  });
+})();
+</script>
+</body>
+</html>

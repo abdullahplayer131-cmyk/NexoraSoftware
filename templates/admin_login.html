@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Admin Login — Nexora</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="login-wrap">
+  <form class="login-card" action="/admin/login" method="post">
+    <a class="brand" href="/"><span class="brand-mark">N</span><span>NEXORA<small>ADMIN</small></span></a>
+    {% with messages = get_flashed_messages() %}{% for m in messages %}<div class="notice">{{ m }}</div>{% endfor %}{% endwith %}
+    <label>Admin password<input type="password" name="password" required autocomplete="current-password" autofocus></label>
+    <button class="btn" type="submit">Sign in</button>
+  </form>
+</main>
+</body>
+</html>

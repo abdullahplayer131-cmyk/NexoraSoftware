@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nexora Software — Digital Software Store</title>
+<meta name="description" content="Genuine digital software and downloadable files, delivered securely after payment.">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+{% set icons = {'software':'💾','win11':'🪟','office':'📄','android':'🤖','security':'🛡️','design':'🎨','bundle':'📦'} %}
+<header class="topbar">
+  <a class="brand" href="/"><span class="brand-mark">N</span><span>NEXORA<small>SOFTWARE</small></span></a>
+  <div class="top-actions">
+    <button class="outline-btn" id="ordersBtn" type="button">My orders</button>
+    <button class="btn" id="cartBtn" type="button">Cart <span class="badge" id="cartCount">0</span></button>
+  </div>
+</header>
+
+<section class="hero">
+  <p class="eyebrow">PREMIUM DIGITAL STORE</p>
+  <h1>Software you can trust,<br><span class="gold">delivered securely.</span></h1>
+  <p class="lead">Genuine software and files from Nexora. Pay, get confirmed, download. No guesswork.</p>
+  <a class="btn" href="#store">Browse products</a>
+</section>
+
+<main class="wrap" id="store">
+  <div class="filters">
+    <input id="search" type="search" placeholder="Search products…" aria-label="Search products">
+    <div class="chips" id="chips">
+      <button class="chip active" type="button" data-cat="">All</button>
+      {% for c in products|map(attribute='category')|unique|sort %}<button class="chip" type="button" data-cat="{{c}}">{{c}}</button>{% endfor %}
+    </div>
+  </div>
+
+  <div class="grid" id="grid">
+  {% for p in products %}
+    <article class="card" data-id="{{p.id}}" data-name="{{p.name}}" data-price="{{p.price}}" data-category="{{p.category}}">
+      <div class="card-top"><span class="icon">{{ icons.get(p.icon, '💾') }}</span>{% if p.tag %}<span class="tag">{{p.tag}}</span>{% endif %}</div>
+      <h3>{{p.name}}</h3>
+      <p class="sub">{{p.subtitle}}</p>
+      <p class="desc">{{p.description}}</p>
+      <div class="buy"><strong>Rs. {{ "{:,}".format(p.price) }}</strong><button class="btn add" type="button">Add to cart</button></div>
+    </article>
+  {% endfor %}
+  </div>
+  <p class="empty" id="emptyMsg" {% if products %}hidden{% endif %}>{% if products %}No products match your search.{% else %}New products are coming soon. Please check back shortly.{% endif %}</p>
+</main>
+
+<footer class="footer">
+  <p>© Nexora Software. Only genuine, authorised software is sold here. Downloads unlock after payment is confirmed.</p>
+</footer>
+
+<dialog id="cartDialog">
+  <div class="dlg-head"><h2>Your cart</h2><button class="x" type="button" data-close aria-label="Close">✕</button></div>
+  <div id="cartItems"></div>
+  <p class="total">Total: <strong id="cartTotal">Rs. 0</strong></p>
+  <form id="checkoutForm" class="stack">
+    <label>Full name<input name="name" maxlength="120" required autocomplete="name"></label>
+    <label>Email<input name="email" type="email" maxlength="254" required autocomplete="email"></label>
+    <button class="btn" id="placeBtn" type="submit">Place order</button>
+    <p class="fine" id="checkoutMsg" role="status"></p>
+  </form>
+</dialog>
+
+<dialog id="ordersDialog">
+  <div class="dlg-head"><h2>My orders</h2><button class="x" type="button" data-close aria-label="Close">✕</button></div>
+  <p class="fine">Orders placed on this device. Download unlocks once payment is confirmed.</p>
+  <div id="ordersList"></div>
+</dialog>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
