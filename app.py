@@ -15,7 +15,7 @@ if not _secret:
 app.secret_key = _secret
 
 app.config["DATABASE"] = os.environ.get("DATABASE_PATH", "").strip() or "/tmp/nexora.db"
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # limit for ONE request (a chunk), not for the whole file
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = True
@@ -29,10 +29,14 @@ ALLOWED = {".apk", ".exe", ".zip"}
 MIME = {".apk": "application/vnd.android.package-archive",
         ".exe": "application/vnd.microsoft.portable-executable",
         ".zip": "application/zip"}
-MAX_FILE = 100 * 1024 * 1024
-CHUNK_SIZE = 256 * 1024
+try:
+    MAX_UPLOAD_MB = max(1, min(2048, int(os.environ.get("MAX_UPLOAD_MB", "600"))))
+except ValueError:
+    MAX_UPLOAD_MB = 600
+MAX_FILE = MAX_UPLOAD_MB * 1024 * 1024
+CHUNK_SIZE = 1024 * 1024  # 1 MB per request
 UPLOAD_TEMP = "/tmp/nexora_upload_chunks"
-STUCK_AFTER = 30 * 60  # seconds before an "uploading" job is reported as failed
+STUCK_AFTER = 90 * 60  # seconds before an "uploading" job is reported as failed
 
 INSERT_PRODUCT = """INSERT INTO products(name,category,price,tag,description,subtitle,icon,download_file_id,download_file_name,download_file_size)
 VALUES(?,?,?,?,?,?,?,?,?,?)"""
@@ -99,7 +103,7 @@ def upload_to_patrins(path, filename):
     if not name or ext not in ALLOWED: raise ValueError("Only APK, EXE, or ZIP files are allowed.")
     size = os.path.getsize(path)
     if size < 1: raise ValueError("Selected file is empty.")
-    if size > MAX_FILE: raise ValueError("Maximum upload size is 100 MB.")
+    if size > MAX_FILE: raise ValueError(f"Maximum upload size is {MAX_UPLOAD_MB} MB.")
     headers = auth_headers()
     r = requests.post(BASE+"upload-direct/init",
         headers={**headers,"Content-Type":"application/json"},
@@ -240,7 +244,7 @@ def admin_logout():
 def admin_dashboard():
     products = db().execute("SELECT * FROM products ORDER BY id DESC").fetchall()
     orders = db().execute("SELECT * FROM orders ORDER BY id DESC LIMIT 100").fetchall()
-    return render_template("admin.html",products=products,orders=orders)
+    return render_template("admin.html",products=products,orders=orders,max_upload_mb=MAX_UPLOAD_MB)
 
 # Legacy single-request route retained for compatibility (the dashboard now uses the chunk uploader).
 @app.post("/admin/products")
@@ -313,11 +317,32 @@ def cleanup_old_uploads():
         except OSError:
             pass
 
+def assemble_file(folder, meta):
+    """Join chunk files into one file on disk (streamed), deleting each chunk right after it is copied."""
+    total_parts = (meta["size"]+CHUNK_SIZE-1)//CHUNK_SIZE
+    assembled_path = os.path.join(folder,"assembled.upload")
+    total = 0
+    with open(assembled_path,"wb") as out:
+        for part in range(total_parts):
+            path = os.path.join(folder,f"{part:06d}.part")
+            if not os.path.isfile(path): raise ValueError(f"Chunk {part+1} is missing. Please retry the upload.")
+            expected = min(CHUNK_SIZE,meta["size"]-total)
+            if os.path.getsize(path)!=expected: raise ValueError(f"Chunk {part+1} has an invalid size. Please retry.")
+            with open(path,"rb") as src: shutil.copyfileobj(src,out,1024*1024)
+            os.remove(path)
+            total += expected
+    if os.path.getsize(assembled_path)!=meta["size"]: raise ValueError("Uploaded file size does not match.")
+    return assembled_path
+
 def run_patrins_job(folder, meta):
-    """Runs in a background thread, so the browser request never waits for the slow Patrins upload."""
+    """Runs in a background thread: assemble on disk, stream to Patrins, save the product.
+    The browser request returns immediately, so slow disks or slow uploads never hit the gunicorn/Cloudflare timeouts."""
     assembled = os.path.join(folder,"assembled.upload")
     started = time.time()
     try:
+        write_status(folder,state="assembling",started=started,message="Preparing file on server...")
+        assemble_file(folder,meta)
+        write_status(folder,state="uploading",started=started,message="Uploading to Patrins...")
         uploaded = upload_to_patrins(assembled, meta["filename"])
         conn = sqlite3.connect(app.config["DATABASE"], timeout=30)
         try:
@@ -333,15 +358,24 @@ def run_patrins_job(folder, meta):
         app.logger.exception("Could not reach Patrins")
         write_status(folder,state="error",started=started,error="Could not reach Patrins (network/timeout). Check Hostless logs.")
     except (ValueError,RuntimeError) as e:
-        app.logger.error("Patrins job failed: %s", e)
+        app.logger.error("Upload job failed: %s", e)
         write_status(folder,state="error",started=started,error=str(e))
+    except OSError:
+        app.logger.exception("Disk error during upload")
+        try: write_status(folder,state="error",started=started,error="Server disk error (probably out of space). Try a smaller file.")
+        except OSError: pass
     except Exception:
         app.logger.exception("Unexpected upload error")
         try: write_status(folder,state="error",started=started,error="Unexpected server error. Check Hostless logs.")
         except OSError: pass
     finally:
-        try: os.remove(assembled)
-        except OSError: pass
+        try:
+            for n in os.listdir(folder):
+                if n.endswith(".part") or n=="assembled.upload":
+                    try: os.remove(os.path.join(folder,n))
+                    except OSError: pass
+        except OSError:
+            pass
 
 @app.post("/admin/chunk-upload/start")
 @admin_required
@@ -361,11 +395,12 @@ def chunk_upload_start():
     if not name or len(name)>120 or price<1 or price>10000000:
         return jsonify(error="Enter a valid product name and price."),400
     if ext not in ALLOWED: return jsonify(error="Only APK, EXE, or ZIP files are allowed."),400
-    if size<1 or size>MAX_FILE: return jsonify(error="File must be between 1 byte and 100 MB."),400
+    if size<1 or size>MAX_FILE: return jsonify(error=f"File must be between 1 byte and {MAX_UPLOAD_MB} MB."),400
     os.makedirs(UPLOAD_TEMP,exist_ok=True)
     cleanup_old_uploads()
-    if shutil.disk_usage(UPLOAD_TEMP).free < size*2 + 20*1024*1024:
-        return jsonify(error="Server temporary disk space is too low for this file."),507
+    free = shutil.disk_usage(UPLOAD_TEMP).free
+    if free < size + 64*1024*1024:
+        return jsonify(error=f"Server temporary disk has only {free//(1024*1024)} MB free; this file needs about {size//(1024*1024)+64} MB. Use a smaller file."),507
     upload_id = uuid.uuid4().hex
     folder = chunk_folder(upload_id)
     os.makedirs(folder,exist_ok=False)
@@ -402,40 +437,21 @@ def chunk_upload_finish(upload_id):
     folder = chunk_folder(upload_id)
     metadata_path = os.path.join(folder,"metadata.json")
     if not os.path.isfile(metadata_path): return jsonify(error="Upload session not found. Start again."),404
-
     # Only one finish call per upload: a double click must not create a duplicate product.
     try:
         fd = os.open(os.path.join(folder,"finish.lock"),os.O_CREAT|os.O_EXCL|os.O_WRONLY)
         os.close(fd)
     except FileExistsError:
         return jsonify(success=True,state="uploading",message="Already processing."),202
-
-    def fail(message, code=400):
-        shutil.rmtree(folder,ignore_errors=True)
-        return jsonify(error=message),code
-
     try:
         with open(metadata_path,encoding="utf-8") as f: meta = json.load(f)
-        total_parts = (meta["size"]+CHUNK_SIZE-1)//CHUNK_SIZE
-        assembled_path = os.path.join(folder,"assembled.upload")
-        total_size = 0
-        with open(assembled_path,"wb") as out:
-            for part in range(total_parts):
-                path = os.path.join(folder,f"{part:06d}.part")
-                if not os.path.isfile(path): return fail(f"Chunk {part+1} is missing. Please retry the upload.")
-                expected = min(CHUNK_SIZE,meta["size"]-total_size)
-                if os.path.getsize(path)!=expected: return fail(f"Chunk {part+1} has an invalid size. Please retry.")
-                with open(path,"rb") as src: shutil.copyfileobj(src,out,1024*1024)
-                os.remove(path)  # free disk space as we go
-                total_size += expected
-        if total_size!=meta["size"] or os.path.getsize(assembled_path)!=meta["size"]:
-            return fail("Uploaded file size does not match.")
-        write_status(folder,state="uploading",started=time.time(),message="Uploading to Patrins...")
+        write_status(folder,state="assembling",started=time.time(),message="Preparing file on server...")
         threading.Thread(target=run_patrins_job,args=(folder,meta),daemon=True).start()
-        return jsonify(success=True,state="uploading"),202
+        return jsonify(success=True,state="assembling"),202
     except (KeyError,TypeError,ValueError,OSError):
-        app.logger.exception("Chunk assembly failed")
-        return fail("Could not assemble the uploaded file. Check Hostless logs.",500)
+        app.logger.exception("Could not start upload job")
+        shutil.rmtree(folder,ignore_errors=True)
+        return jsonify(error="Could not start processing. Check Hostless logs."),500
 
 @app.get("/admin/chunk-upload/<upload_id>/status")
 @admin_required
@@ -443,7 +459,7 @@ def chunk_upload_status(upload_id):
     folder = chunk_folder(upload_id)
     st = read_status(folder)
     if st is None: return jsonify(error="Upload session not found."),404
-    if st.get("state")=="uploading" and time.time()-st.get("started",st["updated"])>STUCK_AFTER:
+    if st.get("state") in ("assembling","uploading") and time.time()-st.get("started",st["updated"])>STUCK_AFTER:
         st = {"state":"error","error":"Upload timed out or the server restarted. Please try again."}
     return jsonify(st)
 
