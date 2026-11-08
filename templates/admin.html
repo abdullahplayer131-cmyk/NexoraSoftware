@@ -23,7 +23,7 @@
 <label>Price (PKR)<input type="number" name="price" min="1" max="10000000" required></label>
 <label>Badge<input name="tag" maxlength="30" placeholder="New"></label>
 <label>Icon style<select name="icon"><option value="software">Software</option><option value="win11">Windows</option><option value="office">Office</option><option value="android">Android</option><option value="security">Security</option><option value="design">Design</option><option value="bundle">Bundle</option></select></label>
-<label class="wide">Product file (APK / EXE / ZIP)<input type="file" name="product_file" accept=".apk,.exe,.zip" required><small class="cell-sub">Maximum 100 MB. Browser sends small chunks; file is then uploaded to Patrins.</small></label>
+<label class="wide">Product file (APK / EXE / ZIP)<input type="file" name="product_file" accept=".apk,.exe,.zip" required><small class="cell-sub">Maximum {{ max_upload_mb }} MB. Browser sends small chunks; file is then uploaded to Patrins.</small></label>
 <label class="wide">Description<textarea name="description" rows="3" maxlength="1000" placeholder="What does the product do?"></textarea></label>
 <button class="btn" id="uploadButton" type="submit">Upload &amp; add product +</button>
 <p id="uploadProgress" class="fine-print wide" role="status" aria-live="polite"></p>
@@ -52,9 +52,9 @@
   const form = document.getElementById("productUploadForm");
   const button = document.getElementById("uploadButton");
   const progress = document.getElementById("uploadProgress");
-  const MAX_FILE = 100 * 1024 * 1024;
+  const MAX_FILE = {{ max_upload_mb }} * 1024 * 1024;
   const POLL_MS = 2000;
-  const POLL_LIMIT_MS = 15 * 60 * 1000;
+  const POLL_LIMIT_MS = 90 * 60 * 1000;
   let busy = false;
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -101,7 +101,7 @@
       return;
     }
     if (file.size < 1 || file.size > MAX_FILE) {
-      progress.textContent = "File must be between 1 byte and 100 MB.";
+      progress.textContent = "File must be between 1 byte and {{ max_upload_mb }} MB.";
       return;
     }
 
@@ -155,7 +155,8 @@
           return;
         }
         if (st.state === "error") throw new Error(st.error || "Upload to Patrins failed.");
-        progress.textContent = `Step 2/2 — Uploading to Patrins... (${seconds}s) Please do not close this page.`;
+        const label = st.state === "assembling" ? "Preparing file on server" : "Uploading to Patrins";
+        progress.textContent = `Step 2/2 — ${label}... (${Math.floor(seconds / 60)}m ${seconds % 60}s) Please do not close this page.`;
       }
     } catch (error) {
       progress.textContent = "Upload failed: " + error.message;
